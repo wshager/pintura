@@ -7,7 +7,7 @@ var AccessError = require("perstore/errors").AccessError,
 	when = require("promised-io/promise").when,
 	getCurrentSession = require("./jsgi/session").getCurrentSession,
 	Restrictive = require("perstore/facet").Restrictive,
-	sha1 = require("./util/sha1").b64_sha1,
+	bcrypt = require('bcrypt'),
 	settings = require("perstore/util/settings");
 
 try{
@@ -50,35 +50,58 @@ exports.DefaultSecurity = function(){
 	var userModel;
 	var admins = settings.security && settings.security.admins;
 	var security = {
-		encryptPassword: function(username, password){
-			return password && sha1(password);
+		encryptPassword: function(password){
+			return when(bcrypt.genSalt(16), function(err, salt) {
+				if(err) throw new AccessError("Password encryption error occurred: "+err);
+				return when(bcrypt.hash(password, salt), function(err, hash) {
+					if(err) throw new AccessError("Password encryption error occurred: "+err);
+					return hash;
+				});
+			});
+		},
+		comparePassword: function(password, userPassword) {
+			return when(bcrypt.compare(password, userPassword), function(err, isMatch) {
+				if (err) throw new AccessError("Password encryption error occurred: "+err);
+				return isMatch;
+			});
 		},
 		authenticate: function(username, password){
-			if(typeof this.encryptPassword === 'function'){
-				password = this.encryptPassword(username, password);
-			}
+			var comparePassword = this.comparePassword;
 			return when(security.getUserModel().get(username), function(user){
-				if(!user || (user.password !== password)){
-					// allow admins to authenticate					
-					if (!admins || !(user=admins[username]) || user.password !== password)
-						throw new AccessError("No user with the provided password");
-					user.id = username;
-				}
-				return user;
+				return when(comparePassword(password, user.password), function(isMatch) {
+					if(!user || !isMatch){
+						// allow admins to authenticate					
+						if (!admins || !(user=admins[username]) || !isMatch)
+							throw new AccessError("No user with the provided password");
+						user.id = username;
+					}
+					return user;
+				});
 			});
 		},
 		createUser: function(username, password){
-			if(typeof this.encryptPassword === 'function'){
-				password = this.encryptPassword(username, password);
-			}
-			return when(security.getUserModel().get(username), function(user){
-				// N.B. disallow overwrite admins
-				var admins = settings.security.admins;
-				if(user || (admins && admins[username]))
-					throw new AccessError("User already exists");
-				return security.getUserModel().add({
-						password: password
-					}, {id: username, overwrite: false});
+			if(!username || !password) throw new Error("No username or password specified.");
+			return when(this.encryptPassword(password), function(password) {
+				return when(security.getUserModel().get(username), function(user){
+					// N.B. disallow overwrite admins
+					var admins = settings.security.admins;
+					if(user || (admins && admins[username]))
+						throw new AccessError("User already exists");
+					return security.getUserModel().add({
+							password: password
+						}, {id: username, overwrite: false});
+				});
+			});
+		},
+		changePassword: function(username, password){
+			if(!username || !password) throw new Error("No username or password specified.");
+			return when(this.encryptPassword(password), function(password) {
+				return when(security.getUserModel().get(username), function(user){
+					// N.B. disallow overwrite admins
+					if(!user) throw new Error("User does not exist");
+					user.password = password;
+					return security.getUserModel().put(user, {id: username, overwrite: true});
+				});
 			});
 		},
 		getUserModel: function(){
@@ -122,8 +145,7 @@ exports.DefaultSecurity = function(){
 
 
 
-var Facet = require("perstore/facet").Facet,
-	Restrictive = require("perstore/facet").Restrictive;
+var Facet = require("perstore/facet").Facet;
 
 var FullAccess = exports.FullAccess = Facet(Object, function(store){
 	var storeFullAccess = Facet(store, store);
@@ -141,16 +163,16 @@ FullAccess.quality = 1;
 
 
 var ReadOnly = Restrictive(Object, {
-/**	appliesTo: Object,
+/*	appliesTo: Object,
 	allowed: function(object, env){
 		return true;//env.remoteUser.name == "admin";
 	},
-/*	load: function(object, source){
+	load: function(object, source){
 		return object;
 	},
 	update: function(object, source){
 		return source;
-	},* /
+	},
 
 var ReadOnly = new SchemaFacet(Object, {
 	additionalProperties:{
